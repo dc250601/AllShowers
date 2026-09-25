@@ -18,7 +18,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.nn.utils import clip_grad_norm_, get_total_norm
 
 from allshowers import data_loader, data_sets, flow_matching, transformer, util
-
+from tqdm.auto import tqdm
 
 class Trainer:
     def __init__(
@@ -61,6 +61,8 @@ class Trainer:
         self.init_model(conf["model"])
         if "num_layers" in conf["model"]:
             conf["data"]["num_layers"] = conf["model"]["num_layers"]
+
+        print("Buildind the train and val loaders")
         self.train_loader, self.val_loader, self.trafos = data_sets.get_data_loaders(
             conf["data"],
             self.batch_size,
@@ -69,6 +71,7 @@ class Trainer:
             self.local_rank,
             trafos_file,
         )
+        print("Loaded the data")
         self.trafos = {key: value.to(self.device) for key, value in self.trafos.items()}
         self.configure_optimizer()
 
@@ -235,7 +238,7 @@ class Trainer:
             train_loss_count = 0
             self.flow.train()
             self.optimizer.zero_grad()
-            for step, batch in enumerate(self.train_loader):
+            for step, batch in tqdm(enumerate(self.train_loader)):
                 if step // self.grad_accum == len(self.train_loader) // self.grad_accum:
                     continue
                 self.step = step
@@ -440,6 +443,12 @@ def get_args(args: list[str] | None = None) -> argparse.Namespace:
         default="",
         help="which device to use, if not set, use cuda if available, else cpu",
     )
+    parser.add_argument("--result_path",
+                        type=str,
+                        required=True,
+                        help="where to store results"
+        
+    )
     parser.add_argument(
         "--fast-dev-run",
         action="store_true",
@@ -482,11 +491,12 @@ def main(args: list[str] | None = None) -> None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
 
+    
+
     if "result_path" not in conf or parsed_args.fast_dev_run:
+        print("result_path not in conf")
         if rank == 0:
-            conf["result_path"] = util.setup_result_path(
-                conf["run_name"], parsed_args.param_file, parsed_args.fast_dev_run
-            )
+            conf["result_path"] = parsed_args.result_path
         if world_size > 1:
             store = dist.TCPStore(  # type: ignore
                 host_name=os.environ["MASTER_ADDR"],

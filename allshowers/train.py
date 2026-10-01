@@ -20,6 +20,10 @@ from torch.nn.utils import clip_grad_norm_, get_total_norm
 from allshowers import data_loader, data_sets, flow_matching, transformer, util
 from tqdm.auto import tqdm
 
+import wandb
+
+from dotenv import load_dotenv
+
 class Trainer:
     def __init__(
         self,
@@ -28,6 +32,7 @@ class Trainer:
         rank: int = 0,
         world_size: int = 1,
         local_rank: int = 0,
+        use_wandb: bool = False,
     ) -> None:
         self.conf = conf
         if isinstance(device, str):
@@ -56,6 +61,9 @@ class Trainer:
         self.best_file = self.get_path("weights/best.pt")
         self.final_file = self.get_path("weights/final.pt")
         self.plot_folder = "plots/"
+
+        self.use_wandb = use_wandb
+        
         trafos_file = self.get_path("preprocessing/trafos.pt")
 
         self.init_model(conf["model"])
@@ -238,7 +246,7 @@ class Trainer:
             train_loss_count = 0
             self.flow.train()
             self.optimizer.zero_grad()
-            for step, batch in tqdm(enumerate(self.train_loader)):
+            for step, batch in tqdm(enumerate(self.train_loader),total = len(self.train_loader)):
                 if step // self.grad_accum == len(self.train_loader) // self.grad_accum:
                     continue
                 self.step = step
@@ -259,8 +267,10 @@ class Trainer:
                     self.optimizer.zero_grad()
                 train_loss_sum += loss.item() * len(losses)
                 train_loss_count += len(losses)
+                
                 self.train_losses_batch.append(loss.item())
                 self.learning_rates.append(self.optimizer.param_groups[0]["lr"])
+
             if self.scheduler_interval == "epoch" and self.scheduler is not None:
                 self.scheduler.step()
             if self.rank == 0:
@@ -301,6 +311,17 @@ class Trainer:
         print(f"{'train loss:':16s} {self.train_losses[-1]:.4f}")
         print(f"{'validation loss:':16s} {self.val_losses[-1]:.4f}")
         print(f"{'learning rate:':16s} {self.learning_rates[-1]:.2e}")
+        
+        if self.use_wandb:
+            wandb.log(
+                {
+                    "Epoch":self.epoch,
+                    "Time taken per epoch":time.perf_counter() - self.epoch_start,
+                    "Training Loss":self.train_losses[-1],
+                    "Validation Loss":self.val_losses[-1],
+                    "Learning Rate":self.learning_rates[-1],
+                }
+            )
         sys.stdout.flush()
 
         plt.plot(list(range(self.epoch)), self.train_losses, label="train")
@@ -435,7 +456,9 @@ class Trainer:
 
 def get_args(args: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="train network")
-    parser.add_argument("param_file", type=str, help="where to find the parameters")
+    parser.add_argument("param_file",
+                        type=str,
+                        help="where to find the parameters")
     parser.add_argument(
         "-d",
         "--device",
@@ -443,11 +466,16 @@ def get_args(args: list[str] | None = None) -> argparse.Namespace:
         default="",
         help="which device to use, if not set, use cuda if available, else cpu",
     )
-    parser.add_argument("--result_path",
-                        type=str,
-                        required=True,
-                        help="where to store results"
-        
+    parser.add_argument(
+        "--result_path",
+        type=str,
+        required=True,
+        help="where to store results"    
+    )
+    parser.add_argument(
+        "--wandb",
+        type=bool,
+        default=True
     )
     parser.add_argument(
         "--fast-dev-run",
@@ -491,8 +519,14 @@ def main(args: list[str] | None = None) -> None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
 
+    if parsed_args.wandb == True:
+        wandb.login(key=os.environ["WANDB_API_KEY"])
+        wandb.init(
+             project = "AllShowers",
+             name = f"Default_run"
+             )
+        
     
-
     if "result_path" not in conf or parsed_args.fast_dev_run:
         print("result_path not in conf")
         if rank == 0:
@@ -527,8 +561,9 @@ def main(args: list[str] | None = None) -> None:
         conf["train"]["batch_size"] = 2
         conf["data"]["val_len"] = 2
         conf["data"]["stop"] = conf["data"]["val_len"] + 4 * world_size
-
-    trainer = Trainer(conf, device, rank, world_size, local_rank)
+    
+    trainer = Trainer(conf, device, rank, world_size, local_rank, use_wandb = parsed_args.wandb)
+    
     print(
         f"[rank={rank}] Start training on device {device} on host {socket.gethostname()}."
     )
@@ -547,4 +582,5 @@ def main(args: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
+    load_dotenv()
     main()

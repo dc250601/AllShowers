@@ -1,7 +1,7 @@
 run_name: CNF-Transformer
 
 data:
-  path: data/showers.h5
+  path: /data/dust/user/diptarko/AllShowers/data/showers.h5
   samples_energy_trafo:
     - [Log, {alpha: 0.0}]
     - [StandardScaler, {shape: [1, 1]}]
@@ -12,7 +12,8 @@ data:
     - [StandardScaler, {shape: [1, 1]}]
   return_noise: True
   return_direction: True
-  val_len: 50000
+  val_len: 10000
+  stop: 100000
 
 model:
   num_layers: 78

@@ -474,7 +474,7 @@ def get_args(args: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--wandb",
-        type=bool,
+        type=lambda value: value.lower() in ("true", "1", "yes"),
         default=True
     )
     parser.add_argument(
@@ -519,7 +519,8 @@ def main(args: list[str] | None = None) -> None:
         device = "cuda" if torch.cuda.is_available() else "cpu"
     device = torch.device(device)
 
-    if parsed_args.wandb == True:
+    use_wandb = parsed_args.wandb and rank == 0
+    if use_wandb:
         wandb.login(key=os.environ["WANDB_API_KEY"])
         wandb.init(
              project = "AllShowers",
@@ -562,7 +563,7 @@ def main(args: list[str] | None = None) -> None:
         conf["data"]["val_len"] = 2
         conf["data"]["stop"] = conf["data"]["val_len"] + 4 * world_size
     
-    trainer = Trainer(conf, device, rank, world_size, local_rank, use_wandb = parsed_args.wandb)
+    trainer = Trainer(conf, device, rank, world_size, local_rank, use_wandb = use_wandb)
     
     print(
         f"[rank={rank}] Start training on device {device} on host {socket.gethostname()}."

@@ -27,38 +27,27 @@ def triton_topk(
     
     mask = offsets < end_idx
 
+    if size <= TOP_K:
+        keep = mask
+    else:
+        scores = tl.load(
+            s_ptr + offsets,
+            mask = mask,
+            other = -float("inf"))
+        top_scores = tl.topk(scores, TOP_K)
+        threshold = tl.min(top_scores,axis=0)
+        keep = mask & (scores >= threshold)
+        
     v = tl.load(
         v_ptr + offsets,
         mask=mask,
-        other=0,
-    )
-
-    s = tl.load(
-        s_ptr + offsets,
-        mask=mask,
-        other=-float("inf"),
-    )
-
-    sorted_scores = tl.sort(s, descending=True)
-
-    k = tl.minimum(size,TOP_K)
-
-
-    topk_score = tl.max(
-        tl.where(
-            ranks == (k - 1),
-            sorted_scores,
-            -float("inf"),
-        ),
-        axis=0,
-    )
-
-    topk_mask = mask & (s >= topk_score)
+        other=-float("-inf"),
+    )  
     
     tl.store(
     output_ptr + offsets,
     v,
-    mask=topk_mask,)
+    mask=keep,)
 
 
 ## Mask as a dimension of m,3 where 3--> B,Q,V

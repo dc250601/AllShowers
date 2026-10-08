@@ -14,7 +14,8 @@ class Indexer(torch.nn.Module):
                  head_dim,
                  n_heads,
                  num_layer_cond = 4,
-                 TOP_K = 128
+                 TOP_K = 128,
+                 topk_block_size = 1024,
                 ):
         
         super().__init__()
@@ -30,6 +31,7 @@ class Indexer(torch.nn.Module):
         self.num_layer_cond = num_layer_cond
         self.TOP_K = TOP_K
 
+        self.topk_block_size = topk_block_size
 
     
     def get_score(self,
@@ -120,7 +122,7 @@ class Indexer(torch.nn.Module):
             start_idx,
             stop_idx,
             TOP_K=self.TOP_K,
-            BLOCK_SIZE=1024,
+            BLOCK_SIZE=self.topk_block_size,
         )
 
         mask = output !=-1

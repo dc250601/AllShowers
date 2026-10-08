@@ -55,13 +55,10 @@ def triton_topk(
 
     topk_mask = mask & (s >= topk_score)
     
-    write_offsets = tl.cumsum(topk_mask.to(tl.int32), axis=0) - 1
-    
     tl.store(
-        output_ptr + write_offsets + begin_idx,
-        v,
-        mask=topk_mask,
-    )
+    output_ptr + offsets,
+    v,
+    mask=topk_mask,)
 
 
 ## Mask as a dimension of m,3 where 3--> B,Q,V

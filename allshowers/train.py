@@ -15,9 +15,11 @@ from matplotlib import pyplot as plt
 from rangerlite import RangerLite
 from torch import optim
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import Dataset, DataLoader
 from torch.nn.utils import clip_grad_norm_, get_total_norm
 
 from allshowers import data_loader, data_sets, flow_matching, transformer, util
+from . import data_util
 from tqdm.auto import tqdm
 
 import wandb
@@ -64,23 +66,89 @@ class Trainer:
 
         self.use_wandb = use_wandb
         
-        trafos_file = self.get_path("preprocessing/trafos.pt")
+        # trafos_file = self.get_path("preprocessing/trafos.pt")
+        trafos_file = "trafos/trafos.pt" ## Hardcoding the trafo for now, not like we change training data everyday :)
 
         self.init_model(conf["model"])
         if "num_layers" in conf["model"]:
             conf["data"]["num_layers"] = conf["model"]["num_layers"]
 
         print("Buildind the train and val loaders")
-        self.train_loader, self.val_loader, self.trafos = data_sets.get_data_loaders(
-            conf["data"],
-            self.batch_size,
-            self.rank,
-            self.world_size,
-            self.local_rank,
-            trafos_file,
-        )
-        print("Loaded the data")
-        self.trafos = {key: value.to(self.device) for key, value in self.trafos.items()}
+######################################################################################################
+######################################################################################################
+######################################################################################################
+        # self.train_loader, self.val_loader, self.trafos = data_sets.get_data_loaders(
+        #     conf["data"],
+        #     self.batch_size,
+        #     self.rank,
+        #     self.world_size,
+        #     self.local_rank,
+        #     trafos_file,
+        # )
+        # print("Loaded the data")
+
+        start = conf["data"]["start"] if "start" in conf["data"] else 0
+        stop = conf["data"]["stop"] if "stop" in conf["data"] else 0
+
+        total_showers = stop - start
+
+        if "val_len" in conf["data"]:
+            val_len = conf["data"]["val_len"]
+        else:
+            if rank == 0:
+                warnings.warn("val_len not found in config setting to 20 % of training")
+                val_len = int(0.2*total_showers)
+                
+        showers_per_rank = total_showers // self.world_size
+
+        (energy_scaler,
+         coordinate_scaler,
+         conditioning_scaler) = data_util.ShowerDatasetFromH5.PrepareScalesFromTrafoFile(config_dataset = conf["data"],
+                                                                                         trafo_path=trafos_file,
+                                                                                         rank=self.rank,
+                                                                                         world_size=self.world_size,
+                                                                                         local_rank=self.local_rank
+                                                                                        )
+        
+        self.train_dataset = data_util.ShowerDatasetFromH5(path = conf["data"]["path"],
+                                                          energy_scaler=energy_scaler,
+                                                          coordinate_scaler=coordinate_scaler,
+                                                          conditioning_scaler = conditioning_scaler,
+                                                          start = start + rank * showers_per_rank,
+                                                          stop = start + (rank+1) * showers_per_rank,
+                                                          num_layers=conf["model"]["num_layers"])
+        
+        self.train_dataloader = DataLoader(self.train_dataset,
+                                           batch_size=conf["train"]["batch_size"]//world_size,
+                                           shuffle=True,
+                                           num_workers=16,
+                                           persistent_workers=True,
+                                           prefetch_factor = 4
+                                          )
+
+        if rank == 0:
+
+            self.test_dataset = data_util.ShowerDatasetFromH5(path = conf["data"]["path"],
+                                                              energy_scaler=energy_scaler,
+                                                              coordinate_scaler=coordinate_scaler,
+                                                              conditioning_scaler = conditioning_scaler,
+                                                              start = stop,
+                                                              stop = stop + val_len,
+                                                              num_layers=conf["model"]["num_layers"])
+
+            self.test_dataloader = DataLoader(self.test_dataset,
+                                              batch_size=conf["train"]["batch_size"]//self.world_size,
+                                              shuffle=True,
+                                              num_workers=4,
+                                              persistent_workers=True,
+                                              prefetch_factor = 4
+                                          )
+        if world_size > 1:
+            torch.distributed.barrier(device_ids=[self.local_rank])
+        # self.trafos = {key: value.to(self.device) for key, value in self.trafos.items()}
+######################################################################################################
+######################################################################################################
+
         self.configure_optimizer()
 
         if self.rank == 0:
@@ -88,8 +156,8 @@ class Trainer:
                 p.numel() for p in self.flow.parameters() if p.requires_grad
             )
             print(f"number of parameters: {number_of_parameters}")
-            print("train samples:", len(self.train_loader.data_set))
-            print("val samples:", len(self.val_loader.data_set))
+            print("train samples:", len(self.train_dataset))
+            print("val samples:", len(self.test_dataset))
             print("batch size:", self.batch_size)
             print("gradient accumulation:", self.grad_accum)
             print("num epochs:", self.num_epochs)
@@ -246,8 +314,8 @@ class Trainer:
             train_loss_count = 0
             self.flow.train()
             self.optimizer.zero_grad()
-            for step, batch in tqdm(enumerate(self.train_loader),total = len(self.train_loader)):
-                if step // self.grad_accum == len(self.train_loader) // self.grad_accum:
+            for step, batch in tqdm(enumerate(self.train_dataloader),total = len(self.train_dataloader)):
+                if step // self.grad_accum == len(self.train_dataloader) // self.grad_accum:
                     continue
                 self.step = step
                 losses = self.get_loss(batch)
@@ -297,7 +365,7 @@ class Trainer:
         self.flow.eval()
         loss_sum = 0.0
         num_samples = 0
-        for batch in self.val_loader:
+        for batch in self.test_dataloader:
             losses = self.get_loss(batch)
             loss = torch.mean(losses)
             loss_sum += loss.item() * len(losses)
@@ -524,7 +592,7 @@ def main(args: list[str] | None = None) -> None:
         wandb.login(key=os.environ["WANDB_API_KEY"])
         wandb.init(
              project = "AllShowers",
-             name = f"Default_run"
+             # name = f"Default_run"
              )
         
     

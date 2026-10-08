@@ -14,6 +14,7 @@ class ShowerDatasetFromH5(torch.utils.data.Dataset):
                  coordinate_scaler,
                  conditioning_scaler,
                  num_layers,
+                 RESIZE_FACTOR = 1,
                  start = None,
                  stop = None
                 ):
@@ -27,7 +28,8 @@ class ShowerDatasetFromH5(torch.utils.data.Dataset):
         self.coordinate_scaler = coordinate_scaler
         self.energy_scaler = energy_scaler
         self.conditioning_scaler = conditioning_scaler
-
+        self.RESIZE_FACTOR = RESIZE_FACTOR
+        
         self.__prepare_label_look_up_table()
         
     def __len__(self):
@@ -65,7 +67,7 @@ class ShowerDatasetFromH5(torch.utils.data.Dataset):
                                    stop=stop)
          
         mask = shower[:,:,[3]] > 0
-        energy = self.conditioning_scaler(energy)
+        energy = self.conditioning_scaler(self.RESIZE_FACTOR*energy)
         
         coordinates_xy = self.coordinate_scaler(shower[:,:,[0,1]])
         hit_energy = self.energy_scaler(shower[:,:,[3]])

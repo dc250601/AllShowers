@@ -1,12 +1,21 @@
 import torch
 from torch import nn
 
+import torch
+from torch import nn
+
+from .triton_kernels import triton_mask_maker, triton_custom_mask, triton_topk
+import triton
+import triton.language as tl
+
 class Indexer(torch.nn.Module):
     def __init__(self,
                  hidden_dim,
                  head_dim,
                  n_heads,
-                 num_layer_cond = 4):
+                 num_layer_cond = 4,
+                 TOP_K = 128
+                ):
         
         super().__init__()
 
@@ -19,9 +28,10 @@ class Indexer(torch.nn.Module):
         self.n_heads = n_heads
 
         self.num_layer_cond = num_layer_cond
+        self.TOP_K = TOP_K
 
 
-    @torch.compile(fullgraph=True)
+    
     def get_score(self,
                   Q,
                   K,
@@ -41,37 +51,35 @@ class Indexer(torch.nn.Module):
         s = torch.relu(s)
     
         return (s * sub_W).sum(dim=-1)
+    
 
     
-    @torch.compile(fullgraph=True)
-    def compute_neighbour_mask(self,
-                               padding_mask,
-                               layer):
-    
-        padding_mask = padding_mask.flatten(1)
-        layer = layer.flatten(1)
+    def prepare_neighbour_mask(self,
+                               mask,
+                               layer
+                              ):
         
-        if self.num_layer_cond < 0:
-    
-            def mask_fn(b, h, q_idx, kv_idx):
-                return padding_mask[b, q_idx] & padding_mask[b, kv_idx]
-        else:
-    
-            def mask_fn(b, h, q_idx, kv_idx):
-                lower_bound = (
-                    layer[b, q_idx] - layer[b, kv_idx] >= -1 * (self.num_layer_cond + 1) // 2
-                )
-                upper_bound = layer[b, q_idx] - layer[b, kv_idx] <= self.num_layer_cond // 2
-                not_padding = padding_mask[b, q_idx] & padding_mask[b, kv_idx]
-                return lower_bound & upper_bound & not_padding
+        layer = layer[:,:,0]
+        mask = mask[:,:,0]
+        all_mask = torch.empty((mask.shape[0], mask.shape[1],mask.shape[1]),dtype=torch.bool,device=mask.device)
+        grid = (all_mask.shape[0],all_mask.shape[1])
         
-        return mask_fn
+        t_kernel = triton_mask_maker[grid](
+            layer_ptr = layer,
+            mask_ptr = mask,
+            output_ptr = all_mask,
+            NUM_LAYER_COND = 4,
+            SEQUENCE_LENGTH =  mask.shape[1],
+            BATCH_SIZE =  mask.shape[0]
+        )
 
+        return all_mask
+        
 
-    def forward(self,
+    def prepare_score(self,
                 x,
-                padding_mask,
-                layer):
+                neighbour_mask,
+                     ):
 
         Q = self.Wq(x)
 
@@ -84,28 +92,82 @@ class Indexer(torch.nn.Module):
         
         W = self.Ww(x)
 
-
-        batch,query,key = torch.meshgrid(torch.arange(0,x.shape[0],device=x.device),
-                                     torch.arange(x.shape[1],device=x.device),
-                                     torch.arange(x.shape[1],device=x.device),
-                                    )
-
-        mask_func = self.compute_neighbour_mask(padding_mask=padding_mask,
-                                                layer=layer
-                                               )
+        b,q,v = torch.where(neighbour_mask)
         
-        mask = mask_func(batch,0,query,key)
-        
-        b,q,v = torch.where(mask)
         score = self.get_score(Q,K,W,b,q,v)
 
         return score,b,q,v
 
+
+    def prepare_topk(self,scores,b,q,v):
+        
+        b_idx = get_begin_idx(b)
+        q_idx = get_begin_idx(q)
+        
+        start_idx = []
+        stop_idx = []
+
+        start_idx = q_idx
+        stop_idx = torch.concat((q_idx[1:],torch.tensor([len(q)],device =q_idx.device)))
+        
+        output = torch.full_like(v,-1)
+        grid = (len(start_idx),)
+
+        t_kernel = triton_topk[grid](
+            v,
+            scores,
+            output,
+            start_idx,
+            stop_idx,
+            TOP_K=self.TOP_K,
+            BLOCK_SIZE=1024,
+        )
+
+        mask = output !=-1
+        b_new,q_new,v_new = b[mask],q[mask],v[mask]
+        index_vec = torch.concatenate([b_new[:,None],q_new[:,None],v_new[:,None]],-1)
+
+        return index_vec
+
+    
+    def get_topk_mask(self,x,index_vec):
+        all_mask = torch.empty((x.shape[0],x.shape[1],x.shape[1]),dtype=torch.bool,device=x.device)
+        all_mask[...] = False
+
+        BLOCK_SIZE = 8192
+        grid = (triton.cdiv(len(index_vec), BLOCK_SIZE),)
+        
+        t_kernel = triton_custom_mask[grid](
+            mask_stream_ptr= index_vec,
+            output_ptr = all_mask,
+            n_elements =  len(index_vec),
+            BLOCK_SIZE =  BLOCK_SIZE, ## Number of streams to process
+            SEQUENCE_LENGTH = x.shape[1],
+            BATCH_SIZE =  x.shape[0])
+
+        return all_mask
+    
+    def forward(
+        self,
+        x,
+        mask,
+        layer,):
+        
+        neighbour_mask = self.prepare_neighbour_mask(mask,layer)
+        score,b,q,v =  self.prepare_score(x,neighbour_mask)
+
+        if self.training:
+            return score,b,q,v
+        else:
+            index_vec = self.prepare_topk(score,b,q,v)
+            top_mask = self.get_topk_mask(x,index_vec)
+            return top_mask,neighbour_mask
+        
+
+    
 
 
 def get_begin_idx(t):
     change_indices = torch.where(t[1:] != t[:-1])[0] + 1
     begin_idx = torch.cat([torch.tensor([0],device = t.device),change_indices])
     return begin_idx
-
-

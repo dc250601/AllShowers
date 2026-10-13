@@ -16,6 +16,7 @@ class Indexer(torch.nn.Module):
                  num_layer_cond = 4,
                  TOP_K = 128,
                  topk_block_size = 1024,
+                 USE_FLAT_MASK = False
                 ):
         
         super().__init__()
@@ -32,8 +33,9 @@ class Indexer(torch.nn.Module):
         self.TOP_K = TOP_K
 
         self.topk_block_size = topk_block_size
+        self.USE_FLAT_MASK = USE_FLAT_MASK
 
-    
+    @torch.compile(dynamic=True)
     def get_score(self,
                   Q,
                   K,
@@ -153,7 +155,8 @@ class Indexer(torch.nn.Module):
         self,
         x,
         mask,
-        layer,):
+        layer,
+    ):
         
         neighbour_mask = self.prepare_neighbour_mask(mask,layer)
         score,b,q,v =  self.prepare_score(x,neighbour_mask)
@@ -161,9 +164,12 @@ class Indexer(torch.nn.Module):
         if self.training:
             return score,b,q,v
         else:
-            index_vec = self.prepare_topk(score,b,q,v)
-            top_mask = self.get_topk_mask(x,index_vec)
-            return top_mask,neighbour_mask
+            if self.USE_FLAT_MASK:
+                return self.prepare_topk(score,b,q,v)
+            else:
+                index_vec = self.prepare_topk(score,b,q,v)
+                top_mask = self.get_topk_mask(x,index_vec)
+                return top_mask,neighbour_mask
         
 
     

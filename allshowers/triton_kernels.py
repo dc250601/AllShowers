@@ -2,7 +2,6 @@ import triton
 import triton.language as tl
 
 
-
 @triton.jit
 def triton_topk(
     v_ptr,
@@ -57,7 +56,7 @@ def triton_topk(
 def triton_custom_mask(
     mask_stream_ptr,
     output_ptr,
-    n_elements: tl.constexpr,
+    n_elements,
     BLOCK_SIZE: tl.constexpr, ## Number of streams to process
     SEQUENCE_LENGTH: tl.constexpr,
     BATCH_SIZE: tl.constexpr
@@ -158,4 +157,98 @@ def triton_mask_maker(
     + key_indices,
     valid_mask,
     mask=key_indices < SEQUENCE_LENGTH,)
+
+
+
+@triton.jit
+def triton_sparse_attention(
+    Query,
+    Key,
+    Value,
+
+    Output,
     
+    mask_b_ptr,
+    mask_q_ptr,
+    mask_kv_ptr,
+
+    query_begin_pos,
+    query_end_pos,
+    
+    N_Key_tokens: tl.constexpr, ## Maximum number of kv 
+    Sequence_Length: tl.constexpr, ## The sequence length or
+    Head_dim: tl.constexpr,
+    N_head: tl.constexpr,
+    Batch_size: tl.constexpr,
+):
+
+    pid_qb = tl.program_id(axis=0)    
+    pid_head = tl.program_id(axis=1)
+
+    start = tl.load(query_begin_pos+pid_qb)
+    stop = tl.load(query_end_pos+pid_qb)
+
+
+    n_keys = stop - start # Number of keys can be less than N
+
+
+    offsets_kv = tl.arange(0,N_Key_tokens)
+    mask_kv= offsets_kv < n_keys
+
+    offsets_embedding = tl.arange(0,Head_dim)
+    
+
+    b_idx = tl.load(mask_b_ptr + start)
+
+    q_idx = tl.load(mask_q_ptr + start)
+
+    kv_idx = tl.load(mask_kv_ptr + start + offsets_kv,
+                     mask = mask_kv,
+                     other = 0)
+
+    
+    
+    Q_ = tl.load(Query +
+                 b_idx*Sequence_Length*N_head*Head_dim + 
+                 q_idx*N_head*Head_dim + 
+                 pid_head*Head_dim +
+                 offsets_embedding)
+    
+    K_ = tl.load(
+        Key
+        + b_idx * Sequence_Length * N_head * Head_dim
+        + kv_idx[:, None] * N_head * Head_dim
+        + pid_head * Head_dim
+        + offsets_embedding[None, :],
+        mask=mask_kv[:, None] & (offsets_embedding[None, :] < Head_dim),
+        other=0,
+    )
+
+    V_ = tl.load(
+        Value
+        + b_idx * Sequence_Length * N_head * Head_dim
+        + kv_idx[:, None] * N_head * Head_dim
+        + pid_head * Head_dim
+        + offsets_embedding[None, :],
+        mask=mask_kv[:, None] & (offsets_embedding[None, :] < Head_dim),
+        other=0,
+    )
+
+    a = tl.sum(Q_.to(tl.float32)[None, :] * K_.to(tl.float32),
+               axis=1) / (Head_dim ** 0.5)
+    
+    a = tl.where(mask_kv, a, -float("inf"))
+    a = tl.softmax(a, dim=0)
+
+    a = tl.sum(a[:,None] * V_.to(tl.float32), axis=0)
+
+    tl.store(
+        Output + 
+        b_idx * Sequence_Length * N_head * Head_dim +
+        q_idx*N_head*Head_dim + 
+        pid_head*Head_dim +
+        offsets_embedding,
+        a,
+        
+        
+    )    

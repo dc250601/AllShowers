@@ -33,9 +33,20 @@ def triton_topk(
             s_ptr + offsets,
             mask = mask,
             other = -float("inf"))
+        
         top_scores = tl.topk(scores, TOP_K)
         threshold = tl.min(top_scores,axis=0)
-        keep = mask & (scores >= threshold)
+        
+        # keep = mask & (scores >= threshold)
+        score_above = mask & (scores > threshold)
+
+        remaining = TOP_K - tl.sum(score_above.to(tl.int32), axis = 0)
+        
+        score_equal = mask & (scores == threshold)
+        tie_rank = tl.cumsum(score_equal.to(tl.int32), axis=0)
+
+        keep = score_above | (score_equal & (tie_rank <= remaining))
+        
         
     v = tl.load(
         v_ptr + offsets,
@@ -142,7 +153,7 @@ def triton_mask_maker(
                           pid_batch * SEQUENCE_LENGTH + 
                           pid_query)
 
-    lower_bound = query_layer - layer_ >= -((NUM_LAYER_COND + 1) // 2)
+    lower_bound = query_layer - layer_ >= -1 * (NUM_LAYER_COND + 1) // 2
     upper_bound = query_layer - layer_ <=  ((NUM_LAYER_COND // 2))
 
     not_padding = query_mask & mask_

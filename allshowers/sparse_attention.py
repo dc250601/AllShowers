@@ -98,7 +98,7 @@ class MultiHeadSparseAttention:
         query_begin_pos = get_begin_idx(mask_q)
         n_ops = len(mask_b)
         query_end_pos = torch.concatenate([query_begin_pos[1:],torch.tensor([n_ops], device = Q.device)])
-        v_out_triton = torch.empty(self.batch_size, self.sequence_length, self.n_heads, self.head_dim, device = Q.device)
+        v_out_triton = torch.zeros_like(Q)
         
         grid = (query_begin_pos.shape[0],self.n_heads)
         

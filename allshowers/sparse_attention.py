@@ -124,3 +124,87 @@ class MultiHeadSparseAttention:
         )
 
         return v_out_triton
+
+
+class TopKSparseAttention(nn.Module):
+    def __init__(self,
+                 embed_dim,
+                 n_head_attention,
+                 n_head_indexer,
+                 head_dim_indexer,
+                 top_k,
+                ):
+        super().__init__()
+
+        self.n_head_attention = n_head_attention
+
+        self.dense_mha = nn.MultiheadAttention(EMBED_DIM, ATTENTION_HEADS,batch_first=True)
+
+        with torch.no_grad():
+            eye = torch.eye(EMBED_DIM)
+            self.dense_mha.in_proj_weight.copy_(eye.repeat(3, 1))
+            self.dense_mha.in_proj_bias.zero_()
+        
+            self.dense_mha.out_proj.weight.copy_(eye)
+            self.dense_mha.out_proj.bias.zero_()
+
+        self.indexer = Indexer(
+            hidden_dim = EMBED_DIM,
+            head_dim = head_dim_indexer,
+            n_heads = n_head_indexer,
+            TOP_K=top_k,
+            topk_block_size=8192,
+            USE_FLAT_MASK= True)
+
+    def __get_softmax_score(self,
+                            b,
+                            q,
+                            v,
+                            score,
+                            shape
+                           ):
+
+        sparse_scores = torch.sparse_coo_tensor(
+        indices=torch.stack((b, q, v)),
+        values=score.float(),
+        size=shape,
+        device=score.device,
+        is_coalesced=True)
+
+        scores = torch.sparse.log_softmax(sparse_scores, dim=-1)
+
+        
+        with torch.no_grad():
+            q_idx = get_begin_idx(q)
+
+        return scores.values(), len(q_idx)
+    
+    def forward(self,
+                hidden,
+                query,
+                key,
+                value,
+                mask,
+                layer):
+
+        neighbour_mask = self.indexer.prepare_neighbour_mask(mask,layer)
+        score,b,q,v =  self.indexer.prepare_score(hidden.detach(),neighbour_mask)
+        neighbour_mask = neighbour_mask.unsqueeze(1)
+
+        
+        mha_mask = neighbour_mask.repeat(1,self.n_head_attention,1,1).reshape(-1,mask.shape[1],mask.shape[1])
+        
+        output_vec, attn_weight = self.dense_mha(query, key, value, attn_mask = ~mha_mask)
+
+        output_vec = torch.nan_to_num(output_vec, nan=0.0)
+        
+        score, n_group = self.__get_softmax_score(b,q,v,score,neighbour_mask[:,0].shape)
+        
+        attn_weight = attn_weight[neighbour_mask.squeeze(1)]
+
+        loss = F.kl_div(score,
+                attn_weight.detach(),
+                reduction="sum",
+                log_target=False,)
+        loss = loss/n_group
+        return output_vec, loss

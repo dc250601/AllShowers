@@ -1,6 +1,9 @@
 import torch
 import warnings
+import torch.nn as nn
 from .triton_kernels import triton_sparse_attention
+from .indexer import Indexer
+import torch.nn.functional as F
 
 def get_begin_idx(t):
     change_indices = torch.where(t[1:] != t[:-1])[0] + 1
@@ -138,10 +141,10 @@ class TopKSparseAttention(nn.Module):
 
         self.n_head_attention = n_head_attention
 
-        self.dense_mha = nn.MultiheadAttention(EMBED_DIM, ATTENTION_HEADS,batch_first=True)
+        self.dense_mha = nn.MultiheadAttention(embed_dim, n_head_attention,batch_first=True)
 
         with torch.no_grad():
-            eye = torch.eye(EMBED_DIM)
+            eye = torch.eye(embed_dim)
             self.dense_mha.in_proj_weight.copy_(eye.repeat(3, 1))
             self.dense_mha.in_proj_bias.zero_()
         
@@ -149,7 +152,7 @@ class TopKSparseAttention(nn.Module):
             self.dense_mha.out_proj.bias.zero_()
 
         self.indexer = Indexer(
-            hidden_dim = EMBED_DIM,
+            hidden_dim = embed_dim,
             head_dim = head_dim_indexer,
             n_heads = n_head_indexer,
             TOP_K=top_k,

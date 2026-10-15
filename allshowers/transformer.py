@@ -64,16 +64,17 @@ class FlexEncoderLayer(nn.Module):
         self.num_head = num_head
         self.dim_embedding = dim_embedding
         self.dim_head = dim_embedding // num_head
-
+        self.dim_feedforward = dim_feedforward
+        
         activation_classes = {
             "relu": nn.ReLU,
             "gelu": nn.GELU,
             "leaky_relu": nn.LeakyReLU,
         }
         if isinstance(activation, str):
-            activation_module = activation_classes[activation]()
+            self.activation_module = activation_classes[activation]()
         else:
-            activation_module = activation
+            self.activation_module = activation
         del activation
 
         if dropout > 0.0:
@@ -84,7 +85,7 @@ class FlexEncoderLayer(nn.Module):
         self.key_query_value = nn.Linear(dim_embedding, dim_embedding * 3)
         self.feedforward = nn.Sequential(
             nn.Linear(dim_embedding, dim_feedforward),
-            activation_module,
+            self.activation_module,
             nn.Linear(dim_feedforward, dim_embedding),
             self.dropout,
         )
@@ -156,14 +157,14 @@ class Transformer(nn.Module):
             "leaky_relu": nn.LeakyReLU,
         }
         if isinstance(activation, str):
-            activation_module = activation_classes[activation.lower()]()
+            self.activation_module = activation_classes[activation.lower()]()
         else:
-            activation_module = activation
+            self.activation_module = activation
         del activation
         if num_points_cond > 0:
             self.num_points_embedding = nn.Sequential(
                 nn.Linear(num_layers, num_points_cond),
-                activation_module,
+                self.activation_module,
                 nn.Linear(num_points_cond, dim_embedding),
             )
         else:
@@ -179,7 +180,7 @@ class Transformer(nn.Module):
                     dim_embedding,
                     num_head,
                     dim_feedforward=dim_feedforward,
-                    activation=activation_module,
+                    activation=self.activation_module,
                     dropout=dropout,
                 )
                 for _ in range(num_blocks)

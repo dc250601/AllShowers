@@ -207,6 +207,7 @@ class Transformer(nn.Module):
         layer: Tensor,
         block_mask: BlockMask,
         label: Tensor | None = None,
+        **kwargs
     ) -> Tensor:
         x = self.embedding(x)
         x += self.layer_embedding(layer.squeeze())

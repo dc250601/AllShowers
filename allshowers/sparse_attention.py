@@ -151,6 +151,8 @@ class TopKSparseAttention(nn.Module):
             self.dense_mha.out_proj.weight.copy_(eye)
             self.dense_mha.out_proj.bias.zero_()
 
+        self.dense_mha.requires_grad_(False)
+        
         self.indexer = Indexer(
             hidden_dim = embed_dim,
             head_dim = head_dim_indexer,

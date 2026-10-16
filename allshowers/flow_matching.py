@@ -16,6 +16,7 @@ class CNF(nn.Module):
         network: Transformer,
         frequencies: int = 3,
         solver: str = "heun",
+        indexer_flag = False,
     ) -> None:
         super().__init__()
         self.frequencies = nn.Buffer(
@@ -24,7 +25,8 @@ class CNF(nn.Module):
         self.num_layer_cond = network.num_layer_cond
         self.network = network
         self.set_solver(solver)
-
+        self.indexer_flag = indexer_flag
+        
     def set_solver(self, solver: str) -> None:
         if solver not in ode_solvers.integrators:
             raise ValueError(
@@ -37,7 +39,7 @@ class CNF(nn.Module):
         t = self.frequencies * t.reshape(-1, 1)
         t = torch.cat((t.cos(), t.sin()), dim=-1)
         t = t.expand(x.shape[0], -1)
-
+        
         return self.network(t, x, **kwargs)
 
     def __calculate_block_mask(self, kwargs: dict[str, Tensor | BlockMask]) -> None:
@@ -55,7 +57,7 @@ class CNF(nn.Module):
                 f"Got {type(kwargs['layer'])} and {type(kwargs['mask'])}."
             )
         mask = kwargs["mask"]
-        del kwargs["mask"]
+        # del kwargs["mask"] # Why ??? 
         kwargs["block_mask"] = compute_mask(
             padding_mask=mask,
             layer=kwargs["layer"],
@@ -71,7 +73,9 @@ class CNF(nn.Module):
         return self.solver(self, z, 1.0, 0.0, num_timesteps, **kwargs)
 
     def loss(self, x: Tensor, noise: Tensor | None, **kwargs) -> Tensor:
+        
         self.__calculate_block_mask(kwargs)
+        
         t = torch.rand(
             [x.shape[0]] + [1] * (x.dim() - 1), device=x.device, dtype=x.dtype
         )
@@ -79,7 +83,12 @@ class CNF(nn.Module):
         y = (1 - t) * x + (1e-4 + (1 - 1e-4) * t) * z
         u = (1 - 1e-4) * z - x
 
-        return (self(t.reshape(-1, 1), y, **kwargs) - u).square()
+        if self.indexer_flag:
+            out, indx_loss = self(t.reshape(-1, 1), y, **kwargs)
+            network_loss =  (out - u).square()
+            return network_loss, indx_loss
+        else:
+            return (self(t.reshape(-1, 1), y, **kwargs) - u).square()
 
     def sample(
         self, shape: tuple[int, ...], num_timesteps: int = 200, **kwargs
